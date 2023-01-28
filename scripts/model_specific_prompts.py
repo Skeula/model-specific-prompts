@@ -9,13 +9,37 @@ import difflib
 import random
 
 scripts_dir = scripts.basedir()
-kw_idx = 0
-hash_dict = None
-hash_dict_modified = None
-model_hash_dict = {}
+model_mappings = None
+model_mappings_modified = None
+
+MODEL_HASH=0
+MODEL_CKPT=1
+PROMPT=2
+NEGATIVE_PROMPT=3
+IDX=4
+
+ROW = [MODEL_HASH, MODEL_CKPT, PROMPT, NEGATIVE_PROMPT]
+
+DEFAULT_IDX = 0
+CUSTOM_IDX = 1
+
+DEFAULT_MAPPINGS = 'default-mappings.csv'
+CUSTOM_MAPPINGS = 'custom-mappings.csv'
+
+
+def normalize_entry (entry, idx=None):
+    row = []
+    for field in ROW:
+        value = entry[field].strip(' ') if field<len(entry) else ''
+        row.append(value)
+    if idx != None:
+        row.append(idx)
+    return row
 
 def str_simularity(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
+
+model_hash_dict = {}
 
 def get_old_model_hash(filename):
     if filename in model_hash_dict:
@@ -33,221 +57,166 @@ def get_old_model_hash(filename):
     except FileNotFoundError:
         return 'NOFILE'
 
-def load_hash_dict():
-    global hash_dict, hash_dict_modified, scripts_dir
+def get_current_model ():
+    model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
+    model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
+    return model_hash, model_ckpt
 
-    default_file = f'{scripts_dir}/model-keyword.txt'
-    user_file = f'{scripts_dir}/custom-mappings.txt'
+def load_model_mappings():
+    global model_mappings, model_mappings_modified, scripts_dir
+
+    default_file = f'{scripts_dir}/{DEFAULT_MAPPINGS}'
+    user_file = f'{scripts_dir}/{CUSTOM_MAPPINGS}'
 
     if not os.path.exists(user_file):
         open(user_file, 'w').write('\n')
 
     modified = str(os.stat(default_file).st_mtime) + '_' + str(os.stat(user_file).st_mtime)
 
-    if hash_dict is None or hash_dict_modified != modified:
-        hash_dict = defaultdict(list)
+    if model_mappings is None or model_mappings_modified != modified:
+        model_mappings = defaultdict(list)
         def parse_file(path, idx):
             if os.path.exists(path):
                 with open(path, newline='') as csvfile:
-                    csvreader = csv.reader(csvfile)
+                    csvreader = csv.reader(csvfile, skipinitialspace=True)
                     for row in csvreader:
                         try:
-                            mhash = row[0].strip(' ')
-                            kw = row[1].strip(' ')
-                            if mhash.startswith('#'):
+                            if row[0].startswith('#'):
                                 continue
-                            ckptname = 'default' if len(row)<=2 else row[2].strip(' ')
-                            hash_dict[mhash].append((kw, ckptname,idx))
+                            ckptname = 'default' if len(row)<=2 else row[MODEL_CKPT]
+                            dictrow = normalize_entry(row, idx)
+                            model_mappings[row[MODEL_HASH]].append(dictrow)
                         except:
                             pass
 
-        parse_file(default_file, 0) # 0 for default_file
-        parse_file(user_file, 1) # 1 for user_file
+        parse_file(default_file, DEFAULT_IDX) # 0 for default_file
+        parse_file(user_file, CUSTOM_IDX) # 1 for user_file
 
-        hash_dict_modified = modified
+        model_mappings_modified = modified
 
-    return hash_dict
+    return model_mappings
 
-def get_keyword_for_model(model_hash, model_ckpt, return_entry=False):
+def get_entry_for_current_model():
+    model_hash, model_ckpt = get_current_model()
+
     found = None
 
-    # hash -> [ (keyword, ckptname, idx) ]
-    hash_dict = load_hash_dict()
+    model_mappings = load_model_mappings()
 
-    # print(hash_dict)
+    if model_hash in model_mappings:
+        lst = model_mappings[model_hash]
+        found = lst[0]
 
-    if model_hash in hash_dict:
-        lst = hash_dict[model_hash]
-        if len(lst) == 1:
-            found = lst[0]
-
-        elif len(lst) > 1:
+        if len(lst) > 1:
             max_sim = 0.0
-            found = lst[0]
-            for kw_ckpt in lst:
-                sim = str_simularity(kw_ckpt[1], model_ckpt)
+            for entry in lst:
+                sim = str_simularity(entry[MODEL_CKPT], model_ckpt)
                 if sim >= max_sim:
                     max_sim = sim
-                    found = kw_ckpt
-    if return_entry:
-        return found
-    return found[0] if found else None
+                    found = entry
+
+    if found and found[MODEL_CKPT] == '':
+        found[MODEL_CKPT] = model_ckpt
+
+    return found
 
 class Script(scripts.Script):
     def title(self):
-        return "Model keyword"
+        return "Model Specific Prompts"
 
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
-        def get_embeddings():
-            import glob
-            return [os.path.basename(x) for x in glob.glob(f'{shared.cmd_opts.embeddings_dir}/*.pt')]
-
-        def update_keywords():
-            model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-            model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-            kws = get_keyword_for_model(model_hash, model_ckpt)
-            mk_choices = ["keyword1, keyword2", "random", "iterate"]
-            if kws:
-                mk_choices.extend([x.strip() for x in kws.split('|')])
-            else:
-                mk_choices.extend(["keyword1", "keyword2"])
-            return gr.Dropdown.update(choices=mk_choices)
-        def update_embeddings():
-            ti_choices = ["None"]
-            ti_choices.extend(get_embeddings())
-            return gr.Dropdown.update(choices=ti_choices)
-
-        def check_keyword():
-            model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-            model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-            entry = get_keyword_for_model(model_hash, model_ckpt, return_entry=True)
+        def check_prompt():
+            entry = get_entry_for_current_model()
 
             if entry:
-                kw = entry[0]
-                src = 'custom-mappings.txt' if entry[2]==1 else 'model-keyword.txt (default database)'
-                return f"filename={model_ckpt}\nhash={model_hash}\nkeyword={kw}\nmatch from {src}"
+                src = f'{CUSTOM_MAPPINGS}' if entry[IDX]==1 else f'{DEFAULT_MAPPINGS} (default database)'
+                return f"filename={entry[MODEL_CKPT]}\nhash={entry[MODEL_HASH]}\nprompt={entry[PROMPT]}\nnegative prompt={entry[NEGATIVE_PROMPT]}\nmatch from {src}"
             else:
+                model_hash, model_ckpt = get_current_model()
                 return f"filename={model_ckpt}\nhash={model_hash}\nno match"
 
-        def delete_keyword():
-            model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-            model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-            user_file = f'{scripts_dir}/custom-mappings.txt'
-            user_backup_file = f'{scripts_dir}/custom-mappings-backup.txt'
-            lines = []
-            found = None
+        def edit_custom_mapping(prompt='', negative_prompt=''):
+            model_hash, model_ckpt = get_current_model()
 
-            if os.path.exists(user_file):
-                with open(user_file, newline='') as csvfile:
-                    csvreader = csv.reader(csvfile)
+            user_file = f'{scripts_dir}/{CUSTOM_MAPPINGS}'
+            tmp_user_file = f'{scripts_dir}/{CUSTOM_MAPPINGS}.tmp'
+            user_backup_file = f'{scripts_dir}/{CUSTOM_MAPPINGS}.backup'
+            modified = None
+            with open(tmp_user_file, 'w') as outfile:
+                writer = csv.writer(outfile)
+                with open(user_file, newline='') as infile:
+                    csvreader = csv.reader(infile, skipinitialspace=True)
                     for row in csvreader:
+                        if len(row) == 0:
+                            continue
                         try:
-                            mhash = row[0]
-                            if mhash.startswith('#'):
-                                lines.append(','.join(row))
+                            if row[0].startswith('#'):
+                                writer.writerow(row)
                                 continue
-                            # kw = row[1]
-                            ckptname = None if len(row)<=2 else row[2].strip(' ')
-                            if mhash==model_hash and ckptname==model_ckpt:
-                                found = row
+                            #row = normalize_entry(row)
+                            ckptname = None if len(row)<=MODEL_CKPT else row[MODEL_CKPT]
+                            if row[MODEL_HASH]==model_hash and ckptname==model_ckpt:
+                                modified = normalize_entry(row)
                                 continue
-                            lines.append(','.join(row))
+                            writer.writerow(row)
                         except:
                             pass
-
-            if found:
-                csvtxt = '\n'.join(lines) + '\n'
-                import shutil
+                if prompt != '' or negative_prompt != '':
+                    if modified:
+                        # modified is the row we're replacing, so we pull in
+                        # default values from it
+                        if prompt == '':
+                            prompt = modified[PROMPT]
+                        if negative_prompt == '':
+                            negative_prompt = modified[NEGATIVE_PROMPT]
+                    
+                    modified = normalize_entry([model_hash, model_ckpt, prompt, negative_prompt])
+                    writer.writerow(modified)
+            if modified:
                 try:
-                    shutil.copy(user_file, user_backup_file)
+                    os.unlink(user_backup_file)
                 except:
                     pass
-                open(user_file, 'w').write(csvtxt)
+                try:
+                    os.rename(user_file, user_backup_file)
+                except:
+                    os.unlink(user_file)
+                    pass
+                os.rename(tmp_user_file, user_file)
+            else:
+                unlink(tmp_user_file)
 
+            return modified
+
+        def delete_prompt():
+            found = edit_custom_mapping()
+            if found:
                 return f'deleted entry: {found}'
             else:
                 return f'no custom mapping found'
 
+        def add_custom(prompt, negative_prompt):
+            if len(prompt)+len(negative_prompt) == 0:
+                return "Fill model specific prompts"
+            modified = edit_custom_mapping(prompt, negative_prompt)
 
-        def add_custom(txt):
-            txt = txt.strip()
-            model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-            model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-            if len(txt) == 0:
-                return "Fill keyword(trigger word) or keywords separated by | (pipe character)"
-            insert_line = f'{model_hash}, {txt}, {model_ckpt}'
-            global scripts_dir
-
-            user_file = f'{scripts_dir}/custom-mappings.txt'
-            user_backup_file = f'{scripts_dir}/custom-mappings-backup.txt'
-            lines = []
-
-            if os.path.exists(user_file):
-                with open(user_file, newline='') as csvfile:
-                    csvreader = csv.reader(csvfile)
-                    for row in csvreader:
-                        try:
-                            mhash = row[0]
-                            if mhash.startswith('#'):
-                                lines.append(','.join(row))
-                                continue
-                            # kw = row[1]
-                            ckptname = None if len(row)<=2 else row[2].strip(' ')
-                            if mhash==model_hash and ckptname==model_ckpt:
-                                continue
-                            lines.append(','.join(row))
-                        except:
-                            pass
-            lines.append(insert_line)
-            csvtxt = '\n'.join(lines) + '\n'
-            import shutil
-            try:
-                shutil.copy(user_file, user_backup_file)
-            except:
-                pass
-            open(user_file, 'w').write(csvtxt)
-
-            return 'added: ' + insert_line
+            return f'added: hash={modified[MODEL_HASH]}, ckpt={modified[MODEL_CKPT]}, prompt={modified[PROMPT]}, negative_prompt={modified[NEGATIVE_PROMPT]} -- {modified}'
 
         with gr.Group():
-            with gr.Accordion('Model Keyword', open=False):
-                is_enabled = gr.Checkbox(label='Model Keyword Enabled', value=True)
+            with gr.Accordion('Model Specific Prompts', open=False):
+                is_enabled = gr.Checkbox(label='Model Specific Prompts Enabled', value=True)
 
-                keyword_placement = gr.Dropdown(choices=["keyword prompt", "prompt keyword", "keyword, prompt", "prompt, keyword"], 
-                                value='keyword prompt',
-                                label='Keyword placement:')
-
-                mk_choices = ["keyword1, keyword2", "random", "iterate"]
-                mk_choices.extend(["keyword1", "keyword2"])
-
-                # css = '#mk_refresh_btn { min-width: 2.3em; height: 2.5em; flex-grow: 0; margin-top: 0.4em; margin-right: 1em; padding-left: 0.25em; padding-right: 0.25em;}'
-                # with gr.Blocks(css=css):
-                with gr.Row(equal_height=True):
-                    multiple_keywords = gr.Dropdown(choices=mk_choices,
-                                    value='keyword1, keyword2',
-                                    label='Multiple keywords:')
-                    refresh_btn = gr.Button(value='\U0001f504', elem_id='mk_refresh_btn_random_seed') # XXX _random_seed workaround.
-                refresh_btn.click(update_keywords, inputs=None, outputs=multiple_keywords)
-
-                ti_choices = ["None"]
-                ti_choices.extend(get_embeddings())
-                with gr.Row(equal_height=True):
-                    ti_keywords = gr.Dropdown(choices=ti_choices,
-                                    value='None',
-                                    label='Textual Inversion (Embedding):')
-                    refresh_btn = gr.Button(value='\U0001f504', elem_id='ti_refresh_btn_random_seed') # XXX _random_seed workaround.
-                refresh_btn.click(update_embeddings, inputs=None, outputs=ti_keywords)
-
-                keyword_order = gr.Dropdown(choices=["textual inversion first", "model keyword first"], 
-                                value='textual inversion first',
-                                label='Keyword order:')
+                prompt_placement = gr.Dropdown(choices=["model-prompt, your-prompt", "your-prompt, model-prompt", "model-prompt your-prompt", "your-prompt model-prompt"], 
+                                value='model-prompt, your-prompt',
+                                label='Model prompt placement:')
 
                 with gr.Accordion('Add Custom Mappings', open=False):
-                    info = gr.HTML("<p style=\"margin-bottom:0.75em\">Add custom keyword(trigger word) mapping for current model. Custom mappings are saved to extensions/model-keyword/custom-mappings.txt</p>")
-                    text_input = gr.Textbox(placeholder="Keyword or keywords separated by |", label="Keyword(trigger word)")
+                    info = gr.HTML(f"<p style=\"margin-bottom:0.75em\">Set prompts to add to the current model. Custom mappings are saved to extensions/model-specific-prompts/{CUSTOM_MAPPINGS}</p>")
+                    prompt_input = gr.Textbox(placeholder="Prompt text", label="Prompt")
+                    negative_input = gr.Textbox(placeholder="Prompt text", label="Negative Prompt")
                     with gr.Row():
                         check_mappings = gr.Button(value='Check')
                         add_mappings = gr.Button(value='Save')
@@ -255,108 +224,37 @@ class Script(scripts.Script):
 
                     text_output = gr.Textbox(interactive=False, label='result')
 
-                    add_mappings.click(add_custom, inputs=text_input, outputs=text_output)
-                    check_mappings.click(check_keyword, inputs=None, outputs=text_output)
-                    delete_mappings.click(delete_keyword, inputs=None, outputs=text_output)
+                    add_mappings.click(add_custom, inputs=[prompt_input,negative_input], outputs=text_output)
+                    check_mappings.click(check_prompt, inputs=None, outputs=text_output)
+                    delete_mappings.click(delete_prompt, inputs=None, outputs=text_output)
 
 
-        return [is_enabled, keyword_placement, multiple_keywords, ti_keywords, keyword_order]
+        return [is_enabled, prompt_placement]
 
-    def process(self, p, is_enabled, keyword_placement, multiple_keywords, ti_keywords, keyword_order):
+    def process(self, p, is_enabled, prompt_placement):
 
         if not is_enabled:
-            global hash_dict
-            hash_dict = None
+            global model_mappings
+            model_mappings = None
             return
 
-        model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-        model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-        # print(f'model_hash = {model_hash}')
+        def new_prompt(prompt, model_prompt):
+            arr = [model_prompt]
 
-        def new_prompt(prompt, kw, no_iter=False):
-            global kw_idx
-            if kw:
-                kws = kw.split('|')
-                if len(kws) > 1:
-                    kws = [x.strip(' ') for x in kws]
-                    if multiple_keywords=="keyword1, keyword2":
-                        kw = ', '.join(kws)
-                    elif multiple_keywords=="random":
-                        kw = random.choice(kws)
-                    elif multiple_keywords=="iterate":
-                        kw = kws[kw_idx%len(kws)]
-                        if not no_iter:
-                            kw_idx += 1
-                    elif multiple_keywords=="keyword1":
-                        kw = kws[0]
-                    elif multiple_keywords=="keyword2":
-                        kw = kws[1]
-                    elif multiple_keywords in kws:
-                        kw = multiple_keywords
-                    else:
-                        kw = kws[0]
-
-            if ti_keywords == 'None':
-                arr = [kw]
-            else:
-                ti = ti_keywords[:ti_keywords.rfind('.')]
-                if keyword_order == 'model keyword first':
-                    arr = [kw, ti]
-                else:
-                    arr = [ti, kw]
-
-                if None in arr:
-                    arr.remove(None)
-
-                if ',' in keyword_placement:
-                    kw = ', '.join(arr)
-                else:
-                    kw = ' '.join(arr)
-
-            if keyword_placement.startswith('keyword'):
+            if prompt_placement.startswith('model'):
                 arr.append(prompt)
             else:
                 arr.insert(0, prompt)
 
-            if ',' in keyword_placement:
-                return ', '.join(arr)
-            else:
-                return ' '.join(arr)
+            return ', '.join(arr)
 
+        entry = get_entry_for_current_model()
 
-        kw = get_keyword_for_model(model_hash, model_ckpt)
+        if entry:
+            if entry[PROMPT] != '':
+                p.prompt = new_prompt(p.prompt, entry[PROMPT])
+                p.all_prompts = [new_prompt(prompt, entry[PROMPT]) for prompt in p.all_prompts]
 
-        if kw is not None or ti_keywords != 'None':
-            p.prompt = new_prompt(p.prompt, kw, no_iter=True)
-            p.all_prompts = [new_prompt(prompt, kw) for prompt in p.all_prompts]
-
-
-from fastapi import FastAPI, Response, Query, Body
-from fastapi.responses import JSONResponse
-
-
-def model_keyword_api(_: gr.Blocks, app: FastAPI):
-    @app.get("/model_keyword/get_keywords")
-    async def get_keywords():
-        model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-        model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-        r = get_keyword_for_model(model_hash, model_ckpt, return_entry=True)
-        if r is None:
-            return {"keywords": [], "model": model_ckpt, "hash": model_hash, "match_source": "no match"}
-        kws = [x.strip() for x in r[0].split('|')]
-        match_source = "model-keyword.txt" if r[2]==0 else "custom-mappings.txt"
-        return {"keywords": kws, "model": model_ckpt, "hash": model_hash, "match_source": match_source}
-
-    # @app.get("/model_keyword/get_raw_keywords")
-    # async def get_raw_keywords():
-    #     model_ckpt = os.path.basename(shared.sd_model.sd_checkpoint_info.filename)
-    #     model_hash = get_old_model_hash(shared.sd_model.sd_checkpoint_info.filename)
-    #     kw = get_keyword_for_model(model_hash, model_ckpt)
-    #     return {"keywords": kw, "model": model_ckpt, "hash": model_hash}
-
-try:
-    import modules.script_callbacks as script_callbacks
-
-    script_callbacks.on_app_started(model_keyword_api)
-except:
-    pass
+            if entry[NEGATIVE_PROMPT] != '':
+                p.negative_prompt = new_prompt(p.negative_prompt, entry[NEGATIVE_PROMPT])
+                p.all_negative_prompts = [new_prompt(negative_prompt, entry[NEGATIVE_PROMPT]) for negative_prompt in p.all_negative_prompts]
