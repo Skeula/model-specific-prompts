@@ -131,3 +131,4 @@ dmypy.json
 
 custom-mappings.txt
 custom-mappings-backup.txt
+__pycache__
