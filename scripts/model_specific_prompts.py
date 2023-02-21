@@ -105,15 +105,15 @@ def get_entry_for_current_model():
 
     if model_hash in model_mappings:
         lst = model_mappings[model_hash]
-        found = lst[0]
 
-        if len(lst) > 1:
-            max_sim = 0.0
-            for entry in lst:
-                sim = str_simularity(entry[MODEL_CKPT], model_ckpt)
-                if sim >= max_sim:
-                    max_sim = sim
-                    found = entry
+        # start this too low and entirely unresonable things match
+        max_sim = 0.33
+        for entry in lst:
+            sim = str_simularity(entry[MODEL_CKPT], model_ckpt)
+            print(f"{sim} <=> {max_sim} = {entry}")
+            if sim >= max_sim:
+                max_sim = sim
+                found = entry
 
     if found and found[MODEL_CKPT] == '':
         found[MODEL_CKPT] = model_ckpt
