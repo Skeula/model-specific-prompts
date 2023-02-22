@@ -2,6 +2,8 @@ import modules.scripts as scripts
 import gradio as gr
 import csv
 import os
+import re
+import json
 from collections import defaultdict
 
 import modules.shared as shared
@@ -22,6 +24,7 @@ ROW = [MODEL_HASH, MODEL_CKPT, PROMPT, NEGATIVE_PROMPT]
 
 DEFAULT_IDX = 0
 CUSTOM_IDX = 1
+FILE_IDX = 2
 
 DEFAULT_MAPPINGS = 'default-mappings.csv'
 CUSTOM_MAPPINGS = 'custom-mappings.csv'
@@ -101,6 +104,45 @@ def get_entry_for_current_model():
 
     found = None
 
+    metafile = re.sub(r'[.](safetensors|ckpt)$', '', shared.sd_model.sd_checkpoint_info.filename) + '.meta.json'
+    print(f"Looking for {metafile}")
+    #if the default file, see if we have an overrid on disk
+    if os.path.exists(metafile):
+        print(f"found metafile {metafile}")
+        with open(metafile, 'r') as mf:
+            meta = json.load(mf)
+            name_match = None
+            if 'files' in meta:
+                for file in meta['files']:
+                    if file['type'] == 'Model':
+                        if 'name' in file and 'ext' in file:
+                            name_match = file['name'] + file['ext']
+                            break
+                        elif 'filename' in file:
+                            name_match = file['filename']
+                            break
+            if not name_match and 'filename' in meta:
+                name_match = meta['filename']
+            if name_match:
+                model_ckpt = name_match
+
+            entry = [model_hash, model_ckpt, '', '']
+
+            if 'settings' in meta:
+                if 'prompt' in meta['settings']:
+                    entry[PROMPT] = meta['prompt'] if isinstance(meta['prompt'], str) else ', '.join(meta['prompt'])
+                if 'negative_prompt' in meta['settings']:
+                    entry[NEGATIVE_PROMPT] = meta['negative_prompt'] if isinstance(meta['negative_prompt'], str) else ', '.join(meta['negative_prompt'])
+
+            if not entry[PROMPT] and 'trigger' in meta and meta['trigger']:
+                entry[PROMPT] = meta['trigger'] if isinstance(meta['trigger'], str) else ', '.join(meta['trigger'])
+                print(f"found trigger match {entry}")
+
+            if entry[PROMPT] or entry[NEGATIVE_PROMPT]:
+                return normalize_entry(entry, 2)
+            else:
+                print(f"{model_ckpt} No trigger {meta}")
+
     model_mappings = load_model_mappings()
 
     if model_hash in model_mappings:
@@ -132,7 +174,7 @@ class Script(scripts.Script):
             entry = get_entry_for_current_model()
 
             if entry:
-                src = f'{CUSTOM_MAPPINGS}' if entry[IDX]==1 else f'{DEFAULT_MAPPINGS} (default database)'
+                src = '{FILE_MAPPING}' if entry[IDX]==FILE_IDX else '{CUSTOM_MAPPINGS}' if entry[IDX]==CUSTOM_IDX else f'{DEFAULT_MAPPINGS} (default database)'
                 return f"filename={entry[MODEL_CKPT]}\nhash={entry[MODEL_HASH]}\nprompt={entry[PROMPT]}\nnegative prompt={entry[NEGATIVE_PROMPT]}\nmatch from {src}"
             else:
                 model_hash, model_ckpt = get_current_model()
